@@ -47,13 +47,6 @@ class OpenDartClient:
             ))
         return out
 
-    def corp_code_from_stock(self, stock_code: str) -> str:
-        target = stock_code.zfill(6)
-        for c in self.corp_codes():
-            if c.stock_code == target:
-                return c.corp_code
-        raise DartError(f"상장종목코드 {target}의 DART 고유번호를 찾지 못했습니다.")
-
     def full_financials(self, corp_code: str, year: int, reprt_code: str, fs_div="CFS") -> list[dict]:
         data = self._json(
             "fnlttSinglAcntAll.json",
@@ -61,6 +54,15 @@ class OpenDartClient:
             bsns_year=str(year),
             reprt_code=reprt_code,
             fs_div=fs_div,
+        )
+        return data.get("list", []) or []
+
+    def major_accounts(self, corp_code: str, year: int, reprt_code: str) -> list[dict]:
+        data = self._json(
+            "fnlttSinglAcnt.json",
+            corp_code=corp_code,
+            bsns_year=str(year),
+            reprt_code=reprt_code,
         )
         return data.get("list", []) or []
 
