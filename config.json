@@ -1,0 +1,12 @@
+{
+  "account_equity_krw": 10000000,
+  "risk_per_unit_pct": 0.01,
+  "portfolio_heat_limit_pct": 0.05,
+  "sector_heat_limit_pct": 0.025,
+  "volume_multiple": 2.0,
+  "atr_period": 20,
+  "stop_n": 2.0,
+  "pyramid_step_n": 0.5,
+  "max_units_per_symbol": 4,
+  "mode": "paper"
+}
