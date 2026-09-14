@@ -1,0 +1,37 @@
+name: Update K-TURTLE Finance DB
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 9 * * 1-5"   # 18:20 KST, Mon-Fri
+
+permissions:
+  contents: write
+
+jobs:
+  update-finance-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Build finance DB
+        env:
+          OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+        run: python finance_db_builder.py
+
+      - name: Commit DB
+        run: |
+          git config user.name "kturtle-bot"
+          git config user.email "kturtle-bot@users.noreply.github.com"
+          git add data/financial_db.json
+          git diff --cached --quiet || git commit -m "Update finance DB"
+          git push
