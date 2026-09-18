@@ -20,7 +20,7 @@ def turtle_n(df: pd.DataFrame, period: int = 20) -> pd.Series:
         out.iloc[i] = ((period-1) * out.iloc[i-1] + tr.iloc[i]) / period
     return out
 
-def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0):
+def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0, weekly_ma_weeks: int = 120):
     need = {"Open","High","Low","Close","Volume"}
     if not need.issubset(df.columns):
         return {"status":"ERROR","reason":"가격 데이터 필수 열 부족"}
@@ -29,11 +29,20 @@ def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0):
     if len(x) < 60:
         return {"status":"WATCH","reason":"최소 60거래일 데이터 필요"}
 
+    # 필수 주봉 추세 Gate: 현재 종가 > 120주 이동평균선
+    weekly_close = x["Close"].resample("W-FRI").last().dropna()
+    if len(weekly_close) < weekly_ma_weeks:
+        return {"status":"WATCH","reason":f"{weekly_ma_weeks}주 이동평균 계산 데이터 부족"}
+    weekly_ma = weekly_close.rolling(weekly_ma_weeks).mean().iloc[-1]
+    weekly_trend_pass = bool(float(x["Close"].iloc[-1]) > float(weekly_ma))
+
     # 오늘 제외 직전 20/55일 고점, 오늘 제외 직전 20일 평균거래량
     x["N"] = turtle_n(x,20)
     x["H20"] = x["High"].shift(1).rolling(20).max()
     x["H55"] = x["High"].shift(1).rolling(55).max()
     x["V20"] = x["Volume"].shift(1).rolling(20).mean()
+    x["Turnover"] = x["Close"] * x["Volume"]
+    x["ADTV20"] = x["Turnover"].shift(1).rolling(20).mean()
 
     last = x.iloc[-1]
     if pd.isna(last["H55"]) or pd.isna(last["N"]) or pd.isna(last["V20"]):
@@ -66,7 +75,14 @@ def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0):
         "breakout20_pct":breakout20_pct,
         "breakout55_pct":breakout55_pct,
         "atr_n":float(last["N"]),
+        "weekly_ma120":float(weekly_ma),
+        "weekly_trend_pass":weekly_trend_pass,
+        "adtv20":float(last["ADTV20"]) if not pd.isna(last["ADTV20"]) else 0.0,
     }
+
+    if not weekly_trend_pass:
+        result["reason"] = f"주봉 추세 Gate 실패 (종가 {today_close:,.0f} ≤ 120주선 {weekly_ma:,.0f})"
+        return result
 
     if not (break20 or break55):
         result["reason"] = "20일/55일 신고가 돌파 없음"

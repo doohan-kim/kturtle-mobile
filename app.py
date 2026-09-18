@@ -11,7 +11,7 @@ from price_engine import evaluate_price_breakout, calculate_trade_plan
 from heat_engine import evaluate_heat
 from financial_cache import save_financial_gate, load_financial_gate, cache_age_hours
 from candidate_finance_cache import save_candidate_finance, get_candidate_finance
-from trade_journal import record_entry, close_trade, list_trades, delete_trade, performance_summary, grouped_performance, export_csv_bytes, import_csv_bytes
+from trade_journal import record_entry, close_trade, list_trades, delete_trade, performance_summary, grouped_performance, export_csv_bytes, import_csv_bytes, record_add_unit
 from market_scanner import get_kr_universe, scan_market, select_top_sector_leaders, breakout_sector_top3
 
 st.set_page_config(page_title="K-TURTLE Mobile", page_icon="🐢", layout="centered")
@@ -121,7 +121,7 @@ def dart_gate(stock_code: str):
     return gate, reasons, counts, corp, name, "LIVE", 0.0
 
 
-st.title("🐢 K‑TURTLE Mobile v2.6")
+st.title("🐢 K‑TURTLE Mobile v2.7")
 st.caption("가격 원자료 검증 → 매매계획 → Heat → 재무 Gate → 삼성증권 주문 준비")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌐 전체시장","🔎 단일종목","📒 매매일지","📊 성적표"])
@@ -157,11 +157,21 @@ with tab1:
             st.session_state["kt_sector_strength"] = breakout_sector_top3(
                 candidates, sector_strength, top_n=3
             )
+            st.session_state["kt_market_sector_top3"] = sector_strength.head(3).copy()
             st.session_state["kt_candidates"] = leaders
             stats["sector_leaders"] = len(leaders)
             st.session_state["kt_stats"] = stats
         except Exception as e:
             st.error(str(e))
+
+    if "kt_market_sector_top3" in st.session_state:
+        msec = st.session_state["kt_market_sector_top3"]
+        if msec is not None and not msec.empty:
+            brief = " · ".join(
+                f'{int(r["SectorRank"])}위 {r["Sector"]} ({r["SectorScore"]:.1f})'
+                for _, r in msec.head(3).iterrows()
+            )
+            st.caption("📊 시장 전체 강세섹터 TOP3 · 참고용: " + brief)
 
     if "kt_sector_strength" in st.session_state:
         sec = st.session_state["kt_sector_strength"].head(3).copy()
@@ -220,6 +230,9 @@ with tab1:
                         <div><span class="kt-label">1 Unit</span><br><span class="kt-val">{int(qty):,}주</span></div>
                         <div><span class="kt-label">2N 손절</span><br><span class="kt-val">{stop:,.0f}원</span></div>
                         <div><span class="kt-label">+0.5N</span><br><span class="kt-val">{add:,.0f}원</span></div>
+                        <div><span class="kt-label">120주선</span><br><span class="kt-val">{row.get("WeeklyMA120",0):,.0f}원 · PASS</span></div>
+                        <div><span class="kt-label">20일 평균 거래대금</span><br><span class="kt-val">{row.get("ADTV20",0)/100000000:.1f}억원</span></div>
+                        <div><span class="kt-label">주문/ADTV</span><br><span class="kt-val">{row.get("OrderADTVPct",0):.3f}%</span></div>
                       </div>
                     </div>
                     """,
@@ -232,7 +245,8 @@ with tab1:
                     "Close","TodayHigh","H20","H55",
                     "TodayVolume","Avg20Volume","VolumeRatio",
                     "Break20Pct","Break55Pct",
-                    "ATR_N","UnitQty","Stop2N","Add0_5N"
+                    "ATR_N","UnitQty","Stop2N","Add0_5N",
+                    "WeeklyMA120","ADTV20","UnitOrderKRW","OrderADTVPct"
                 ]
                 existing = [c for c in diag_cols if c in cand.columns]
                 show = cand[existing].copy()
@@ -241,7 +255,8 @@ with tab1:
                     "Close":"종가","TodayHigh":"오늘고가","H20":"20일고점","H55":"55일고점",
                     "TodayVolume":"오늘거래량","Avg20Volume":"직전20일평균거래량","VolumeRatio":"거래량배수",
                     "Break20Pct":"20일돌파율(%)","Break55Pct":"55일돌파율(%)",
-                    "ATR_N":"ATR(N)","UnitQty":"1 Unit","Stop2N":"2N손절","Add0_5N":"+0.5N"
+                    "ATR_N":"ATR(N)","UnitQty":"1 Unit","Stop2N":"2N손절","Add0_5N":"+0.5N",
+                    "WeeklyMA120":"120주선","ADTV20":"20일평균거래대금","UnitOrderKRW":"1Unit주문금액","OrderADTVPct":"주문/ADTV(%)"
                 }
                 show = show.rename(columns=rename)
                 st.dataframe(show, use_container_width=True, hide_index=True)
@@ -424,6 +439,9 @@ with tab1:
 **2N 손절:** {selected_row["Stop2N"]:,.0f}원  
 **+0.5N 추가매수:** {selected_row["Add0_5N"]:,.0f}원  
 **거래량 배수:** {selected_row["VolumeRatio"]:.2f}배  
+**120주선:** {selected_row.get("WeeklyMA120",0):,.0f}원 · PASS  
+**20일 평균 거래대금:** {selected_row.get("ADTV20",0)/100000000:.1f}억원  
+**1 Unit / ADTV:** {selected_row.get("OrderADTVPct",0):.3f}% · PASS  
 """
                 )
 
@@ -495,7 +513,7 @@ with tab2:
         # 1) Price Gate
         st.subheader("1. 가격 Gate")
         try:
-            df,ticker = fetch_kr_stock(s, "6mo")
+            df,ticker = fetch_kr_stock(s, "3y")
             price = evaluate_price_breakout(df, 2.0)
         except Exception as e:
             st.error(f"가격 데이터 오류: {e}")
@@ -514,6 +532,14 @@ with tab2:
         if plan.get("status") != "PLAN_READY":
             st.warning(plan.get("reason","매매계획 계산 실패"))
             st.stop()
+
+        adtv20 = float(price.get("adtv20") or 0)
+        unit_order_krw = float(plan["entry_price"]) * int(plan["unit_qty"])
+        order_adtv_pct = (unit_order_krw / adtv20 * 100) if adtv20 > 0 else 999.0
+        if adtv20 < 2_000_000_000 or order_adtv_pct > 0.5:
+            st.error(f"🔴 유동성 Gate FAIL · 20일 평균 거래대금 {adtv20/100000000:.1f}억원 · 주문/ADTV {order_adtv_pct:.3f}%")
+            st.stop()
+        st.success(f"🟢 주봉/유동성 PASS · 120주선 {price['weekly_ma120']:,.0f}원 · ADTV {adtv20/100000000:.1f}억원 · 주문/ADTV {order_adtv_pct:.3f}%")
 
         st.write(f'진입가 **{plan["entry_price"]:,.0f}원**')
         st.write(f'1 Unit **{plan["unit_qty"]:,}주**')
@@ -580,7 +606,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("모바일 최적화 v1.4 · 가격 Gate → 매매가격 계산 → Heat → 재무 Gate → 삼성증권 주문 준비")
+st.caption("v2.7 · 120주 추세 Gate + 유동성 Gate + 최대 3 Units 피라미딩/Heat 재검사")
 
 # v1.3 diagnostic price gate
 
@@ -623,6 +649,45 @@ with tab3:
                     f'섹터: **{t.get("sector")}** · '
                     f'RS: **{float(t.get("rs_score") or 0):.1f}**'
                 )
+
+                # +0.5N 피라미딩: 최대 3 Units, 추가 전 Heat 자동 재검사
+                units = int(t.get("unit_count") or 1)
+                initial_entry = float(t.get("initial_entry_price") or t.get("entry_price") or 0)
+                atr = float(t.get("atr_n") or 0)
+                st.write(f'현재 보유: **{units} / 3 Units**')
+                if units < 3:
+                    next_trigger = initial_entry + (0.5 * atr * units)
+                    st.caption(f'다음 추가매수 신호: {next_trigger:,.0f}원 (+0.5N 단계)')
+                    add_c1, add_c2 = st.columns(2)
+                    add_fill = add_c1.number_input(
+                        "추가 실제 체결가", min_value=0.0, value=float(next_trigger), step=10.0,
+                        key=f'add_fill_{t["trade_id"]}'
+                    )
+                    base_unit_qty = max(1, int(round((float(t.get("risk_krw") or 0) / max(units,1)) / max(2*atr,1))))
+                    add_qty = add_c2.number_input(
+                        "추가 체결수량", min_value=1, value=base_unit_qty, step=1,
+                        key=f'add_qty_{t["trade_id"]}'
+                    )
+                    add_risk = float(add_qty) * 2.0 * atr
+                    auto_pf_heat = sum(float(x.get("risk_krw") or 0) for x in open_trades)
+                    auto_sec_heat = sum(float(x.get("risk_krw") or 0) for x in open_trades if x.get("sector") == t.get("sector"))
+                    add_heat = evaluate_heat(add_risk, 10_000_000, auto_pf_heat, auto_sec_heat)
+                    st.caption(
+                        f'추가 후 Portfolio Heat {add_heat["portfolio_heat_krw"]:,.0f}/{add_heat["portfolio_limit_krw"]:,.0f}원 · '
+                        f'Sector Heat {add_heat["sector_heat_krw"]:,.0f}/{add_heat["sector_limit_krw"]:,.0f}원'
+                    )
+                    if st.button(f"➕ {units+1} Unit 추가 기록", key=f'add_unit_{t["trade_id"]}'):
+                        if add_heat["status"] != "PASS":
+                            st.error("🔴 Heat 상한 초과 — 추가매수 금지")
+                        else:
+                            try:
+                                result = record_add_unit(t["trade_id"], add_fill, add_qty, add_risk)
+                                st.success(f'추가매수 저장 · 현재 {result.get("unit_count",1)} Units')
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+                else:
+                    st.info("최대 3 Units 도달 · 추가매수 금지")
 
                 exit_price = st.number_input(
                     "실제 청산가",
@@ -743,6 +808,6 @@ with tab4:
                 )
 
 st.caption(
-    "v2.6: 최종 후보 재무 24시간 캐시 + 실제 체결 매매일지 + K-TURTLE 실제 성적표. "
+    "v2.7: 120주 추세 Gate + 유동성 Gate(ADTV 20억원/주문 0.5%) + 최대 3 Units + 시장 강세섹터 TOP3 참고표시. "
     "같은 종목은 다시 DART를 호출하지 않으며, 필요할 때만 '재무 새로고침'으로 갱신합니다."
 )

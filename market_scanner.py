@@ -205,7 +205,7 @@ def scan_market(
         try:
             batch = yf.download(
                 tickers=tickers,
-                period="6mo",
+                period="3y",
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
@@ -267,6 +267,19 @@ def scan_market(
                 if plan.get("status") != "PLAN_READY":
                     continue
 
+                # 유동성 Gate: 직전 20일 평균 거래대금 >= 20억원
+                # 그리고 1 Unit 주문금액 <= 평균 거래대금의 0.5%
+                adtv20 = float(sig.get("adtv20") or 0.0)
+                unit_order_krw = float(plan["entry_price"]) * int(plan["unit_qty"])
+                order_adtv_pct = (unit_order_krw / adtv20 * 100.0) if adtv20 > 0 else None
+                liquidity_pass = (
+                    adtv20 >= 2_000_000_000
+                    and order_adtv_pct is not None
+                    and order_adtv_pct <= 0.5
+                )
+                if not liquidity_pass:
+                    continue
+
                 price_candidates.append({
                     "Code": meta["Code"],
                     "Name": meta["Name"],
@@ -286,6 +299,12 @@ def scan_market(
                     "Stop2N": round(plan["initial_stop"], 2),
                     "Add0_5N": round(plan["next_add_price"], 2),
                     "RiskKRW": round(plan["risk_krw"], 0),
+                    "WeeklyMA120": round(sig.get("weekly_ma120", 0), 2),
+                    "WeeklyTrendPass": bool(sig.get("weekly_trend_pass", False)),
+                    "ADTV20": round(adtv20, 0),
+                    "UnitOrderKRW": round(unit_order_krw, 0),
+                    "OrderADTVPct": round(order_adtv_pct, 4),
+                    "LiquidityPass": True,
                 })
 
             except Exception:

@@ -11,7 +11,7 @@ JOURNAL_FILE = Path("/tmp/kturtle_trade_journal.json")
 FIELDS = [
     "trade_id","status","stock_code","name","sector","breakout_type",
     "sector_score","rs_score","entry_date","entry_price","qty",
-    "atr_n","initial_stop","add_05n","add_10n","risk_krw",
+    "atr_n","initial_stop","add_05n","add_10n","risk_krw","unit_count","initial_entry_price",
     "exit_date","exit_price","exit_reason","pnl_krw","return_pct",
     "r_multiple","n_multiple","holding_days","memo"
 ]
@@ -65,6 +65,8 @@ def record_entry(payload: dict[str, Any]) -> dict:
         "add_05n": float(payload.get("add_05n",0)),
         "add_10n": float(payload.get("add_10n",0)),
         "risk_krw": float(payload.get("risk_krw",0)),
+        "unit_count": 1,
+        "initial_entry_price": float(payload.get("entry_price",0)),
         "memo": payload.get("memo",""),
     })
     rows.append(row)
@@ -127,7 +129,7 @@ def import_csv_bytes(data: bytes) -> int:
     for r in reader:
         row = {k: r.get(k) for k in FIELDS}
         # Convert numeric fields
-        for k in ["sector_score","rs_score","entry_price","atr_n","initial_stop","add_05n","add_10n",
+        for k in ["sector_score","rs_score","entry_price","initial_entry_price","atr_n","initial_stop","add_05n","add_10n",
                   "risk_krw","exit_price","pnl_krw","return_pct","r_multiple","n_multiple"]:
             v = row.get(k)
             if v in (None,""):
@@ -135,7 +137,7 @@ def import_csv_bytes(data: bytes) -> int:
             else:
                 try: row[k] = float(v)
                 except Exception: row[k] = None
-        for k in ["qty","holding_days"]:
+        for k in ["qty","holding_days","unit_count"]:
             v = row.get(k)
             if v in (None,""):
                 row[k] = None
@@ -212,3 +214,41 @@ def grouped_performance(key: str) -> list[dict]:
             "avg_return":sum(rets)/len(rets) if rets else None,
         })
     return sorted(out, key=lambda x:x["pnl_krw"], reverse=True)
+
+def get_open_trade(stock_code: str) -> dict | None:
+    code = str(stock_code).zfill(6)
+    for r in _load():
+        if r.get("stock_code") == code and r.get("status") == "OPEN":
+            return r
+    return None
+
+def record_add_unit(trade_id: str, fill_price: float, fill_qty: int, unit_risk_krw: float, memo: str = "") -> dict:
+    """기존 OPEN 거래에 +0.5N 단위 피라미딩을 기록. 최대 3 Units."""
+    rows = _load()
+    target = next((r for r in rows if r.get("trade_id") == trade_id), None)
+    if target is None or target.get("status") != "OPEN":
+        raise ValueError("OPEN 거래를 찾을 수 없습니다.")
+    units = int(target.get("unit_count") or 1)
+    if units >= 3:
+        raise ValueError("K-TURTLE 최대 3 Units에 도달했습니다.")
+    old_qty = int(target.get("qty") or 0)
+    fill_qty = int(fill_qty)
+    fill_price = float(fill_price)
+    if fill_qty < 1 or fill_price <= 0:
+        raise ValueError("추가 체결가/수량을 확인하세요.")
+    initial_entry = float(target.get("initial_entry_price") or target.get("entry_price") or 0)
+    atr = float(target.get("atr_n") or 0)
+    trigger = initial_entry + (0.5 * atr * units)
+    if fill_price < trigger:
+        raise ValueError(f"추가매수 신호 미도달: {units+1} Unit 기준 {trigger:,.0f}원")
+    old_avg = float(target.get("entry_price") or 0)
+    new_qty = old_qty + fill_qty
+    new_avg = ((old_avg * old_qty) + (fill_price * fill_qty)) / new_qty
+    target["initial_entry_price"] = initial_entry
+    target["entry_price"] = new_avg
+    target["qty"] = new_qty
+    target["unit_count"] = units + 1
+    target["risk_krw"] = float(target.get("risk_krw") or 0) + float(unit_risk_krw)
+    target["memo"] = (str(target.get("memo") or "") + f" | Unit {units+1} 추가 {fill_price:,.0f}원×{fill_qty}주" + (f" ({memo})" if memo else "")).strip(" |")
+    _save(rows)
+    return target
