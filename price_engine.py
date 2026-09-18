@@ -55,12 +55,13 @@ def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0, week
     h55 = float(last["H55"])
     avg20_volume = float(last["V20"])
 
-    break20 = today_high > h20
-    break55 = today_high > h55
+    # K-TURTLE 확정 규칙: 장중 고가가 아니라 확정 종가가 직전 채널 고점을 초과해야 돌파
+    break20 = today_close > h20
+    break55 = today_close > h55
     vol_ratio = today_volume / avg20_volume if avg20_volume > 0 else 0.0
 
-    breakout20_pct = (today_high / h20 - 1) * 100 if h20 > 0 else None
-    breakout55_pct = (today_high / h55 - 1) * 100 if h55 > 0 else None
+    breakout20_pct = (today_close / h20 - 1) * 100 if h20 > 0 else None
+    breakout55_pct = (today_close / h55 - 1) * 100 if h55 > 0 else None
 
     result = {
         "status":"WATCH",
@@ -88,14 +89,14 @@ def evaluate_price_breakout(df: pd.DataFrame, volume_multiple: float = 2.0, week
         result["reason"] = "20일/55일 신고가 돌파 없음"
         return result
 
-    result["breakout_type"] = "55일 강한 돌파" if break55 else "20일 약한 돌파"
+    result["breakout_type"] = "55일 강한 돌파 (20일 동시 충족)" if break55 else "20일 약한 돌파"
 
     if vol_ratio < volume_multiple:
         result["reason"] = f"거래량 미달 ({vol_ratio:.2f}배)"
         return result
 
     result["status"] = "PRICE_PASS"
-    result["reason"] = "돌파 + 거래량 조건 충족"
+    result["reason"] = "확정 종가 돌파 + 거래량 조건 충족"
     return result
 
 def calculate_trade_plan(price_result: dict, account_equity: float = 10_000_000, risk_per_unit_pct: float = 0.01):
