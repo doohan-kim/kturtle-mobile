@@ -4,36 +4,41 @@ import xml.etree.ElementTree as ET
 from datetime import date
 
 NUM_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
-REV_KEYS = ("Revenue", "Sales", "OperatingRevenue", "영업수익", "매출액", "수익매출액")
-OP_KEYS = ("OperatingIncomeLoss", "ProfitLossFromOperatingActivities", "영업이익", "영업손익")
-FINANCE_TERMS = ("유상증자", "전환사채", "신주인수권부사채", "교환사채", "CB", "BW", "EB")
+REV_TAGS = {"revenue", "sales", "operatingrevenue"}
+OP_TAGS = {"operatingincomeloss", "profitlossfromoperatingactivities"}
 
+
+def _local(tag):
+    return tag.split("}")[-1].split(":")[-1]
+
+def _norm_tag(tag):
+    return re.sub(r"[^a-z0-9]", "", _local(tag).lower())
 
 def _num(v):
-    if v is None: return None
-    s = str(v).replace(",", "").replace(" ", "").strip()
+    s = str(v or "").replace(",", "").strip()
     if not s or s in {"-", "—"}: return None
-    m = NUM_RE.search(s)
-    if not m: return None
-    try: return float(m.group(0).replace(",", ""))
+    try: return float(s)
+    except Exception:
+        m = NUM_RE.search(s)
+        return float(m.group(0).replace(",", "")) if m else None
+
+def _date(v):
+    try: return date.fromisoformat((v or "")[:10])
     except Exception: return None
 
-
-def _local(tag): return tag.split("}")[-1]
-
-
-def _parse_date(s):
-    try: return date.fromisoformat((s or "")[:10])
-    except Exception: return None
-
-
-def _xml_docs(data: bytes):
+def _read_instance_files(data: bytes):
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for n in z.namelist():
-            if n.lower().endswith((".xml", ".xbrl")):
-                try: yield n, z.read(n)
-                except Exception: pass
-
+        for name in z.namelist():
+            if name.lower().endswith((".xbrl", ".xml")):
+                try:
+                    blob = z.read(name)
+                    root = ET.fromstring(blob)
+                except Exception:
+                    continue
+                # taxonomy/linkbase XMLs have no xbrli:context; ignore them
+                if not any(_local(e.tag).lower() == "context" for e in root.iter()):
+                    continue
+                yield root
 
 def _contexts(root):
     out = {}
@@ -41,120 +46,130 @@ def _contexts(root):
         if _local(e.tag).lower() != "context": continue
         cid = e.attrib.get("id")
         start = end = instant = None
+        dimensional = False
         for c in e.iter():
             t = _local(c.tag).lower()
-            if t == "startdate": start = _parse_date(c.text)
-            elif t == "enddate": end = _parse_date(c.text)
-            elif t == "instant": instant = _parse_date(c.text)
-        if cid: out[cid] = {"start": start, "end": end or instant}
+            if t == "startdate": start = _date(c.text)
+            elif t == "enddate": end = _date(c.text)
+            elif t == "instant": instant = _date(c.text)
+            elif t in {"segment", "scenario", "explicitmember", "typedmember"}:
+                dimensional = True
+        if cid:
+            out[cid] = {"start": start, "end": end or instant, "dimensional": dimensional}
     return out
 
-
-def _facts_from_xml(blob: bytes):
-    try: root = ET.fromstring(blob)
-    except Exception: return []
-    ctxs = _contexts(root); facts=[]
+def _facts(root):
+    ctxs = _contexts(root)
+    out = []
     for e in root.iter():
         if len(e): continue
-        txt=(e.text or "").strip()
-        if not txt or not NUM_RE.search(txt): continue
-        ctx=e.attrib.get("contextRef") or e.attrib.get("contextref")
-        info=ctxs.get(ctx, {})
-        facts.append({"tag":_local(e.tag), "ctx":ctx, "value":_num(txt), "start":info.get("start"), "end":info.get("end")})
-    return [x for x in facts if x["value"] is not None]
+        ctxid = e.attrib.get("contextRef") or e.attrib.get("contextref")
+        if not ctxid or ctxid not in ctxs: continue
+        val = _num(e.text)
+        if val is None: continue
+        c = ctxs[ctxid]
+        if not c.get("start") or not c.get("end"): continue
+        out.append({"tag": _norm_tag(e.tag), "value": val, **c})
+    return out
 
+def _concept_ok(tag, kind):
+    tags = REV_TAGS if kind == "revenue" else OP_TAGS
+    # exact IFRS/DART local concept names first; company extension only if it ends in a canonical concept
+    return tag in tags or any(tag.endswith(x) for x in tags)
 
-def _matches(tag, keys):
-    nt=re.sub(r"[^A-Za-z0-9가-힣]", "", tag).lower()
-    return any(re.sub(r"[^A-Za-z0-9가-힣]", "", k).lower() in nt for k in keys)
+def _period_days(f):
+    return (f["end"] - f["start"]).days + 1
 
-
-def _pick_period_pair(facts, keys):
-    c=[x for x in facts if _matches(x["tag"], keys) and x.get("start") and x.get("end")]
-    if not c: return None, None
-    # duration facts only; current = latest end date, prefer YTD/longer duration and plausible magnitude
-    latest=max(x["end"] for x in c)
-    cur=[x for x in c if x["end"]==latest]
-    cur.sort(key=lambda x: (-(x["end"]-x["start"]).days, -abs(x["value"])))
-    current=cur[0]
-    dur=(current["end"]-current["start"]).days
-    # prior same-period: about one year earlier, similar duration
-    prior=[x for x in c if 330 <= (current["end"]-x["end"]).days <= 400 and abs((x["end"]-x["start"]).days-dur) <= 10]
-    prior.sort(key=lambda x: abs((current["end"]-x["end"]).days-365))
-    return current, (prior[0] if prior else None)
-
-
-def _text_from_pdf(data: bytes) -> str:
-    from pypdf import PdfReader
-    r=PdfReader(io.BytesIO(data))
-    return "\n".join((p.extract_text() or "") for p in r.pages)
-
+def _pick_quarter_fact(facts, kind, end_date):
+    c = [f for f in facts if _concept_ok(f["tag"], kind) and f["end"] == end_date]
+    if not c: return None
+    # Prefer non-dimensional consolidated/total facts to segment facts.
+    nd = [f for f in c if not f.get("dimensional")]
+    if nd: c = nd
+    month = end_date.month
+    # Q1/Q2/Q3: use standalone 3-month IS/CIS amount, not cumulative YTD.
+    if month in (3, 6, 9):
+        q = [f for f in c if 70 <= _period_days(f) <= 110]
+        if q: c = q
+    elif month == 12:
+        # Annual report has annual amount; Q4 cannot be derived safely without Q1-Q3 files.
+        a = [f for f in c if 330 <= _period_days(f) <= 380]
+        if a: c = a
+    # duplicates can remain across IS/CIS; same concept/value is fine. Prefer canonical and largest abs nonzero.
+    c.sort(key=lambda f: (0 if f["tag"] in (REV_TAGS if kind=="revenue" else OP_TAGS) else 1,
+                          abs(_period_days(f) - (90 if month in (3,6,9) else 365)),
+                          -abs(f["value"])))
+    return c[0]
 
 def parse_manual_report(uploaded_file):
-    name=uploaded_file.name; data=uploaded_file.getvalue(); low=name.lower()
-    result={"file":name,"source_type":None,"status":"WATCH","reasons":[],"metrics":{},"financing_terms":[]}
-    if low.endswith(".zip"):
-        result["source_type"]="XBRL ZIP"; facts=[]; all_text=[]
-        try:
-            for _, blob in _xml_docs(data):
-                facts.extend(_facts_from_xml(blob))
-                try: all_text.append(blob.decode("utf-8", errors="ignore"))
-                except Exception: pass
-        except Exception as e:
-            result["reasons"].append(f"XBRL 읽기 실패: {e}"); return result
-        cr, pr=_pick_period_pair(facts, REV_KEYS); co, po=_pick_period_pair(facts, OP_KEYS)
-        if cr: result["metrics"]["revenue_current"]=cr["value"]
-        if pr: result["metrics"]["revenue_prior"]=pr["value"]
-        if co: result["metrics"]["op_current"]=co["value"]
-        if po: result["metrics"]["op_prior"]=po["value"]
-        text=" ".join(all_text)
-        result["financing_terms"]=[t for t in FINANCE_TERMS if t in text]
-    elif low.endswith(".pdf"):
-        result["source_type"]="PDF"
-        try: text=_text_from_pdf(data)
-        except Exception as e:
-            result["reasons"].append(f"PDF 읽기 실패: {e}"); return result
-        result["financing_terms"]=[t for t in FINANCE_TERMS if t in text]
-        # PDF tables are not trusted for automatic numeric PASS/FAIL.
-        result["reasons"].append("PDF는 표 숫자를 안전하게 구조화하기 어려워 자동 PASS 판정에는 사용하지 않습니다. XBRL ZIP을 올려주세요.")
+    name = uploaded_file.name
+    result = {"file": name, "source_type": None, "status": "WATCH", "reasons": [], "quarter": None,
+              "revenue": None, "operating_profit": None, "operating_margin_pct": None}
+    if not name.lower().endswith(".zip"):
+        result["source_type"] = "PDF/OTHER"
+        result["reasons"] = ["자동 판정은 DART IFRS 원문 XBRL ZIP만 사용합니다."]
         return result
-    else:
-        result["reasons"].append("지원 형식은 DART XBRL ZIP 또는 PDF입니다."); return result
-
-    m=result["metrics"]
-    required=("revenue_current","revenue_prior","op_current","op_prior")
-    if not all(k in m for k in required):
-        result["reasons"].append("현재기간과 전년동기 매출·영업이익을 모두 확정하지 못했습니다.")
-        result["reasons"].append("같은 DART 보고서의 XBRL 원문 ZIP 또는 비교기간이 포함된 보고서를 추가해주세요.")
+    result["source_type"] = "XBRL ZIP"
+    facts = []
+    try:
+        for root in _read_instance_files(uploaded_file.getvalue()):
+            facts.extend(_facts(root))
+    except Exception as e:
+        result["reasons"] = [f"XBRL ZIP 읽기 실패: {e}"]
         return result
-
-    rc,rp,oc,op=(m[k] for k in required)
-    if rc <= 0 or rp <= 0:
-        result["status"]="FAIL"; result["reasons"].append("매출 데이터가 0 이하로 확인됩니다."); return result
-    mc=oc/rc*100; mp=op/rp*100
-    m["margin_current"]=mc; m["margin_prior"]=mp
-    m["revenue_growth_pct"]=(rc/rp-1)*100
-
-    # v2.7.1 financial gate spirit: positive operating profit + non-declining revenue + improving margin.
-    if oc <= 0:
-        result["status"]="FAIL"; result["reasons"].append("최근 보고기간 영업이익이 적자입니다.")
-    elif rc < rp:
-        result["status"]="FAIL"; result["reasons"].append("매출이 전년동기보다 감소했습니다.")
-    elif mc <= mp:
-        result["status"]="FAIL"; result["reasons"].append("영업이익률이 전년동기보다 개선되지 않았습니다.")
-    else:
-        result["status"]="PASS"
-        result["reasons"].append("매출 비감소 · 영업이익 흑자 · 영업이익률 개선 확인")
-    if result["financing_terms"]:
-        result["reasons"].append("보고서에 자금조달 관련 용어가 있어 원문 공시 추가 확인 필요")
-        if result["status"]=="PASS": result["status"]="WATCH"
+    if not facts:
+        result["reasons"] = ["XBRL 재무 인스턴스를 찾지 못했습니다."]
+        return result
+    ends = [f["end"] for f in facts if f.get("end")]
+    end = max(ends) if ends else None
+    if not end:
+        result["reasons"] = ["보고기간을 확인하지 못했습니다."]
+        return result
+    rev = _pick_quarter_fact(facts, "revenue", end)
+    op = _pick_quarter_fact(facts, "op", end)
+    if not rev or not op:
+        result["reasons"] = ["매출 또는 영업이익 계정을 확정하지 못했습니다."]
+        return result
+    revenue, operating_profit = rev["value"], op["value"]
+    if revenue == 0:
+        result["reasons"] = ["매출이 0으로 추출되어 자동 판정을 중단했습니다."]
+        return result
+    result.update({
+        "quarter": end.isoformat(),
+        "revenue": revenue,
+        "operating_profit": operating_profit,
+        "operating_margin_pct": operating_profit / revenue * 100,
+        "status": "PARSED",
+        "reasons": []
+    })
     return result
 
-
 def manual_gate_from_reports(parsed_reports):
-    if not parsed_reports:
-        return "WATCH", ["수동 DART 보고서가 없습니다."], None
-    # Prefer XBRL. PASS only when at least one XBRL report itself contains a reliable comparable period.
-    ranked=sorted(parsed_reports, key=lambda x: (x.get("source_type")!="XBRL ZIP", {"PASS":0,"FAIL":1,"WATCH":2}.get(x.get("status"),3)))
-    best=ranked[0]
-    return best.get("status","WATCH"), best.get("reasons",[]), best
+    valid = [r for r in parsed_reports if r.get("status") == "PARSED"]
+    # dedupe by report end date
+    by_q = {}
+    for r in valid:
+        by_q[r["quarter"]] = r
+    rows = [by_q[k] for k in sorted(by_q)]
+    if len(rows) < 4:
+        bad = [r for r in parsed_reports if r.get("status") != "PARSED"]
+        reasons = [f"최근 4개 분기 XBRL이 필요합니다. 현재 {len(rows)}개 분기 확인."]
+        if bad:
+            reasons.append("읽지 못한 파일: " + ", ".join(r.get("file", "") for r in bad[:2]))
+        return "WATCH", reasons, rows[-1] if rows else None
+    h = rows[-4:]
+    profits = [r["operating_profit"] for r in h]
+    margins = [r["operating_margin_pct"] for r in h]
+    profitable = sum(v > 0 for v in profits)
+    last2 = sum(margins[-2:]) / 2
+    prev2 = sum(margins[:2]) / 2
+    margin_up_steps = sum(1 for i in range(1,4) if margins[i] > margins[i-1])
+    op_up_steps = sum(1 for i in range(1,4) if profits[i] > profits[i-1])
+    normal = profitable >= 3 and profits[-1] > 0 and last2 > prev2 and margin_up_steps >= 2
+    turnaround = profits[-1] > 0 and any(v <= 0 for v in profits[:-1]) and op_up_steps >= 2
+    latest = h[-1]
+    if normal:
+        return "PASS", ["최근 4분기 정상 성장형 재무 Gate 통과"], latest
+    if turnaround:
+        return "PASS", ["최근 4분기 턴어라운드형 재무 Gate 통과"], latest
+    return "FAIL", ["최근 4분기 영업이익/영업이익률 개선 조건 미충족"], latest

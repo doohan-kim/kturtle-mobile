@@ -301,10 +301,10 @@ with tab1:
             )
 
             with st.expander("📎 DART 보고서 직접 넣기", expanded=False):
-                st.caption("OpenDART가 안 될 때 DART에서 받은 보고서를 넣으세요. XBRL 원문 ZIP을 권장합니다. 파일을 넣으면 표 대신 PASS / WATCH / FAIL만 판정합니다.")
+                st.caption("OpenDART가 안 될 때 DART의 IFRS 원문 XBRL ZIP을 넣으세요. 최근 4개 분기가 모이면 K-TURTLE 재무 Gate를 즉시 PASS / WATCH / FAIL로 판정합니다.")
                 manual_files = st.file_uploader(
-                    "DART 보고서 파일",
-                    type=["zip", "pdf"],
+                    "DART XBRL ZIP (최근 4개 분기)",
+                    type=["zip"],
                     accept_multiple_files=True,
                     key=f"manual_dart_{selected_code}"
                 )
