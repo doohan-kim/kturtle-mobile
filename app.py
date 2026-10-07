@@ -147,7 +147,13 @@ with tab1:
     pref=f"kt_{country.lower()}_"
     try:
         _u_preview = jp_universe_cached() if is_jp else universe_cached()
-        st.caption(f"스캔 유니버스: {len(_u_preview):,}종목 · {('JPX 공식 TSE Prime/Standard/Growth' if is_jp else 'KRX KOSPI/KOSDAQ')}")
+        if is_jp:
+            _src = _u_preview.attrs.get("universe_source", "TSE")
+            _warn = _u_preview.attrs.get("universe_warning", "")
+            st.caption(f"스캔 유니버스: {len(_u_preview):,}종목 · {_src}")
+            if _warn: st.warning(_warn)
+        else:
+            st.caption(f"스캔 유니버스: {len(_u_preview):,}종목 · KRX KOSPI/KOSDAQ")
     except Exception as _ue:
         _u_preview = None
         st.error(f"종목 유니버스 확인 실패: {_ue}")
@@ -304,7 +310,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("v2.7.5 · v2.7.1 매매규칙 동결 · JPX 공식 일본 전체 유니버스 + 국가별 재무검증")
+st.caption("v2.7.6 · v2.7.1 매매규칙 동결 · JPX 우선 + 안전 폴백 · 국가별 재무검증")
 
 # v1.3 diagnostic price gate
 

@@ -52,78 +52,81 @@ def get_kr_universe() -> pd.DataFrame:
 
 
 def get_jp_universe() -> pd.DataFrame:
-    """JPX 공식 '東証上場銘柄一覧'을 우선 사용해 TSE 국내 보통주 전체 유니버스를 만든다.
+    """일본 TSE 유니버스. JPX 공식 목록 우선, 실패 시 FDR TSE로 안전 폴백.
 
-    FinanceDataReader의 TSE listing은 환경에 따라 일부(예: 50종목)만 반환될 수 있어
-    전체시장 스캔에는 사용하지 않는다. JPX 페이지에서 최신 Excel 링크를 동적으로 찾아
-    Prime/Standard/Growth의 국내 보통주만 남긴다.
+    반환 attrs: universe_source, universe_warning
     """
-    import io
-    import re
+    import io, re
     from urllib.parse import urljoin
     import requests
 
-    page_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
-    headers = {"User-Agent": "Mozilla/5.0 K-TURTLE/2.7.5"}
-    r = requests.get(page_url, headers=headers, timeout=20)
-    r.raise_for_status()
-
-    links = re.findall(r'href=["\\\']([^"\\\']+\\.(?:xlsx?|xls)(?:\\?[^"\\\']*)?)["\\\']', r.text, flags=re.I)
-    if not links:
-        # JPX가 파일 확장자 뒤에 속성을 붙이는 경우까지 넓게 탐색
-        links = re.findall(r'href=["\\\']([^"\\\']*(?:data|list)[^"\\\']*)["\\\']', r.text, flags=re.I)
-        links = [x for x in links if ".xls" in x.lower()]
-    if not links:
-        raise RuntimeError("JPX 공식 상장종목 Excel 링크를 찾지 못했습니다. JPX 페이지 형식 변경 여부를 확인하세요.")
-
-    # misc/01 페이지의 첫 상장종목 Excel을 사용
-    file_url = urljoin(page_url, links[0])
-    fr = requests.get(file_url, headers=headers, timeout=30)
-    fr.raise_for_status()
-    raw = io.BytesIO(fr.content)
-
-    # xlsx는 openpyxl, 구형 xls는 xlrd가 필요할 수 있음
+    errors = []
     try:
-        base = pd.read_excel(raw)
+        page_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+        headers = {"User-Agent": "Mozilla/5.0 (K-TURTLE Mobile; +https://www.jpx.co.jp/)"}
+        r = requests.get(page_url, headers=headers, timeout=12)
+        r.raise_for_status()
+        links = re.findall(r'href=["\\\']([^"\\\']+\.(?:xlsx?|xls)(?:\?[^"\\\']*)?)["\\\']', r.text, flags=re.I)
+        if not links:
+            links = [x for x in re.findall(r'href=["\\\']([^"\\\']+)["\\\']', r.text, flags=re.I) if '.xls' in x.lower()]
+        if not links:
+            raise RuntimeError("JPX Excel 링크 없음")
+        file_url = urljoin(page_url, links[0])
+        fr = requests.get(file_url, headers=headers, timeout=20)
+        fr.raise_for_status()
+        base = pd.read_excel(io.BytesIO(fr.content))
+        def pick(names):
+            return next((n for n in names if n in base.columns), None)
+        code_col = pick(["コード", "Code", "Local Code"])
+        name_col = pick(["銘柄名", "Name", "Issue Name"])
+        market_col = pick(["市場・商品区分", "市場区分", "Market Segment", "Market/Products"])
+        sector_col = pick(["33業種区分", "33業種区分名", "33 Sector(name)", "Sector"])
+        if code_col is None or name_col is None:
+            raise RuntimeError("JPX Excel 열 구조 인식 실패")
+        out = pd.DataFrame({
+            "Code": base[code_col].astype(str).str.replace(r"\.0$", "", regex=True).str.strip(),
+            "Name": base[name_col].astype(str).str.strip(),
+            "Market": base[market_col].astype(str).str.strip() if market_col else "TSE",
+            "SectorLabel": base[sector_col].astype(str).str.strip() if sector_col else "TSE 기타",
+        })
+        if market_col:
+            m=out["Market"]
+            good=m.str.contains("プライム|スタンダード|グロース|Prime|Standard|Growth",case=False,regex=True,na=False)
+            bad=m.str.contains("ETF|ETN|REIT|投資|PRO|外国|Foreign|出資|優先",case=False,regex=True,na=False)
+            out=out[good & ~bad].copy()
+        out=out[out["Code"].str.match(r"^[0-9A-Z]{4}$",na=False)].drop_duplicates("Code").reset_index(drop=True)
+        if len(out) < 1000:
+            raise RuntimeError(f"JPX 응답 종목수 비정상({len(out)})")
+        out.attrs["universe_source"]="JPX 공식 TSE 목록"
+        out.attrs["universe_warning"]=""
+        return out
     except Exception as e:
-        raise RuntimeError(f"JPX 상장종목 Excel 해석 실패: {e}")
+        errors.append(str(e))
 
-    # JPX 일본어/영문 열 이름 모두 대응
-    def pick(names):
-        for n in names:
-            if n in base.columns:
-                return n
-        return None
-
-    code_col = pick(["コード", "Code", "Local Code"])
-    name_col = pick(["銘柄名", "Name", "Issue Name"])
-    market_col = pick(["市場・商品区分", "市場区分", "Market Segment", "Market/Products"])
-    sector_col = pick(["33業種区分", "33業種区分名", "33 Sector(name)", "Sector"])
-
-    if code_col is None or name_col is None:
-        raise RuntimeError(f"JPX Excel 열 구조를 인식하지 못했습니다: {list(base.columns)}")
-
-    out = pd.DataFrame()
-    out["Code"] = base[code_col].astype(str).str.replace(r"\\.0$", "", regex=True).str.strip()
-    out["Name"] = base[name_col].astype(str).str.strip()
-    out["Market"] = base[market_col].astype(str).str.strip() if market_col else "TSE"
-    out["SectorLabel"] = base[sector_col].astype(str).str.strip() if sector_col else "TSE 기타"
-
-    # Prime / Standard / Growth 국내 주식만. ETF/ETN/REIT/PRO Market 등은 제외.
-    if market_col:
-        m = out["Market"]
-        good = m.str.contains("プライム|スタンダード|グロース|Prime|Standard|Growth", case=False, regex=True, na=False)
-        bad = m.str.contains("ETF|ETN|REIT|投資|PRO|外国|Foreign|出資|優先", case=False, regex=True, na=False)
-        out = out[good & ~bad].copy()
-
-    out = out[out["Code"].str.match(r"^[0-9A-Z]{4}$", na=False)].copy()
-    out["SectorLabel"] = out["SectorLabel"].replace({"": "TSE 기타", "nan": "TSE 기타", "None": "TSE 기타"}).fillna("TSE 기타")
-    out = out.drop_duplicates("Code").reset_index(drop=True)
-
-    # 전체시장이라고 부를 수 없는 비정상 축소 응답은 즉시 중단한다.
-    if len(out) < 1000:
-        raise RuntimeError(f"JPX 전체 유니버스가 비정상적으로 작습니다({len(out)}종목). 전체시장 스캔을 중단합니다.")
-    return out
+    # JPX가 일시적으로 차단/지연돼도 앱 전체를 죽이지 않는다.
+    try:
+        base = fdr.StockListing("TSE").copy()
+        if base.empty:
+            raise RuntimeError("FDR TSE 목록 비어 있음")
+        code_col = next((c for c in ["Code","Symbol"] if c in base.columns), None)
+        name_col = next((c for c in ["Name","Company"] if c in base.columns), None)
+        market_col = next((c for c in ["Market","MarketId","Exchange"] if c in base.columns), None)
+        sector_col = next((c for c in ["Sector","Industry"] if c in base.columns), None)
+        if not code_col:
+            raise RuntimeError(f"FDR TSE 코드 열 없음: {list(base.columns)}")
+        out=pd.DataFrame()
+        out["Code"]=base[code_col].astype(str).str.replace(r"\.0$","",regex=True).str.strip()
+        out["Name"]=base[name_col].astype(str).str.strip() if name_col else out["Code"]
+        out["Market"]=base[market_col].astype(str).str.strip() if market_col else "TSE"
+        out["SectorLabel"]=base[sector_col].astype(str).str.strip() if sector_col else "TSE 기타"
+        out=out[out["Code"].str.match(r"^[0-9A-Z]{4}$",na=False)].drop_duplicates("Code").reset_index(drop=True)
+        out.attrs["universe_source"]="FinanceDataReader TSE 폴백"
+        out.attrs["universe_warning"]=("JPX 공식 목록 연결 실패로 대체 목록을 사용합니다. "
+            f"현재 {len(out):,}종목이며 전체시장 여부를 보장하지 않습니다. JPX 오류: {' / '.join(errors)}")
+        return out
+    except Exception as e:
+        errors.append(str(e))
+        raise RuntimeError("일본 종목목록을 불러오지 못했습니다: " + " / ".join(errors))
 
 def _yf_symbol(code: str, market: str, country: str = "KR") -> str:
     if country == "JP":
