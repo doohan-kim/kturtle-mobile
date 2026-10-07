@@ -13,6 +13,7 @@ from financial_cache import save_financial_gate, load_financial_gate, cache_age_
 from candidate_finance_cache import save_candidate_finance, get_candidate_finance
 from trade_journal import record_entry, close_trade, list_trades, delete_trade, performance_summary, grouped_performance, export_csv_bytes, import_csv_bytes, record_add_unit
 from market_scanner import get_kr_universe, scan_market, select_top_sector_leaders, breakout_sector_top3
+from manual_dart_upload import parse_manual_report, manual_gate_from_reports
 
 st.set_page_config(page_title="K-TURTLE Mobile", page_icon="🐢", layout="centered")
 
@@ -121,7 +122,7 @@ def dart_gate(stock_code: str):
     return gate, reasons, counts, corp, name, "LIVE", 0.0
 
 
-st.title("🐢 K‑TURTLE Mobile v2.7")
+st.title("🐢 K‑TURTLE Mobile v2.7.2")
 st.caption("가격 원자료 검증 → 매매계획 → Heat → 재무 Gate → 삼성증권 주문 준비")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌐 전체시장","🔎 단일종목","📒 매매일지","📊 성적표"])
@@ -299,6 +300,32 @@ with tab1:
                 help="체크하면 24시간 캐시를 무시하고 OpenDART에서 다시 조회합니다."
             )
 
+            with st.expander("📎 OpenDART 장애 시 DART 보고서 직접 업로드"):
+                st.caption("DART에서 받은 최근 4개 분기/반기/사업보고서의 XBRL ZIP을 권장합니다. PDF도 지원하지만 표 구조에 따라 추출 오차가 있을 수 있습니다.")
+                manual_files = st.file_uploader(
+                    "DART 보고서 업로드 (최근 4개 분기 권장)",
+                    type=["zip", "pdf"],
+                    accept_multiple_files=True,
+                    key=f"manual_dart_{selected_code}"
+                )
+                financing_confirmed = st.checkbox(
+                    "DART 원문에서 최근 1년 유상증자·CB·BW·EB 없음 확인",
+                    value=False,
+                    key=f"manual_financing_{selected_code}",
+                    help="자동 OpenDART 공시조회가 안 될 때만 사용합니다. 확인하지 않으면 재무 Gate는 WATCH로 유지됩니다."
+                )
+                if manual_files:
+                    parsed_manual = [parse_manual_report(f) for f in manual_files]
+                    preview = pd.DataFrame([{
+                        "파일": x["file"], "형식": x["source_type"], "매출": x["revenue"],
+                        "영업이익": x["operating_profit"], "영업이익률(%)": x["operating_margin_pct"]
+                    } for x in parsed_manual])
+                    st.dataframe(preview, use_container_width=True, hide_index=True)
+                    for x in parsed_manual:
+                        for w in x.get("warnings", []): st.caption(f'⚠️ {x["file"]}: {w}')
+                else:
+                    parsed_manual = []
+
             h1, h2 = st.columns(2)
             current_portfolio_heat = h1.number_input(
                 "현재 Portfolio Heat(원)",
@@ -390,9 +417,23 @@ with tab1:
                             source = "STALE_CACHE"
                             st.warning("🟡 실시간 DART 실패 · 오래된 캐시 참고 · 신규 진입 보류")
                             st.caption(str(e))
+                        elif parsed_manual:
+                            gate, reasons, used_reports = manual_gate_from_reports(parsed_manual, financing_confirmed)
+                            counts = {"RIGHTS_ISSUE":0,"CB":0,"BW":0,"EB":0} if financing_confirmed else {}
+                            corp = None
+                            name = selected_row.get("Name", selected_code)
+                            source = "MANUAL_DART"
+                            st.info("📎 OpenDART 연결 실패 → 업로드한 DART 보고서로 재무 Gate를 계산했습니다.")
+                            st.caption(str(e))
+                            if gate == "PASS":
+                                save_candidate_finance(selected_code, {
+                                    "gate": gate, "reasons": reasons, "counts": counts,
+                                    "corp": corp, "name": name, "source": source
+                                })
+                                st.success("💾 수동 DART 검증 결과를 후보 재무 캐시에 저장했습니다.")
                         else:
                             gate = "WATCH"
-                            reasons = ["OpenDART 연결 실패 + 저장된 후보 재무 캐시 없음"]
+                            reasons = ["OpenDART 연결 실패 + 저장된 후보 재무 캐시 없음 + 수동 DART 보고서 없음"]
                             counts = {}
                             corp = None
                             name = selected_row.get("Name", selected_code)
@@ -607,7 +648,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("v2.7 · 120주 추세 Gate + 유동성 Gate + 최대 3 Units 피라미딩/Heat 재검사")
+st.caption("v2.7.2 · v2.7.1 매매규칙 동결 + OpenDART 장애 시 DART 보고서 수동 업로드")
 
 # v1.3 diagnostic price gate
 
