@@ -300,29 +300,25 @@ with tab1:
                 help="체크하면 24시간 캐시를 무시하고 OpenDART에서 다시 조회합니다."
             )
 
-            with st.expander("📎 OpenDART 장애 시 DART 보고서 직접 업로드"):
-                st.caption("DART에서 받은 최근 4개 분기/반기/사업보고서의 XBRL ZIP을 권장합니다. PDF도 지원하지만 표 구조에 따라 추출 오차가 있을 수 있습니다.")
+            with st.expander("📎 DART 보고서 직접 넣기", expanded=False):
+                st.caption("OpenDART가 안 될 때 DART에서 받은 보고서를 넣으세요. XBRL 원문 ZIP을 권장합니다. 파일을 넣으면 표 대신 PASS / WATCH / FAIL만 판정합니다.")
                 manual_files = st.file_uploader(
-                    "DART 보고서 업로드 (최근 4개 분기 권장)",
+                    "DART 보고서 파일",
                     type=["zip", "pdf"],
                     accept_multiple_files=True,
                     key=f"manual_dart_{selected_code}"
                 )
-                financing_confirmed = st.checkbox(
-                    "DART 원문에서 최근 1년 유상증자·CB·BW·EB 없음 확인",
-                    value=False,
-                    key=f"manual_financing_{selected_code}",
-                    help="자동 OpenDART 공시조회가 안 될 때만 사용합니다. 확인하지 않으면 재무 Gate는 WATCH로 유지됩니다."
-                )
                 if manual_files:
                     parsed_manual = [parse_manual_report(f) for f in manual_files]
-                    preview = pd.DataFrame([{
-                        "파일": x["file"], "형식": x["source_type"], "매출": x["revenue"],
-                        "영업이익": x["operating_profit"], "영업이익률(%)": x["operating_margin_pct"]
-                    } for x in parsed_manual])
-                    st.dataframe(preview, use_container_width=True, hide_index=True)
-                    for x in parsed_manual:
-                        for w in x.get("warnings", []): st.caption(f'⚠️ {x["file"]}: {w}')
+                    manual_gate_preview, manual_reasons_preview, manual_used = manual_gate_from_reports(parsed_manual)
+                    if manual_gate_preview == "PASS":
+                        st.success("🟢 수동 DART 재무 Gate PASS")
+                    elif manual_gate_preview == "FAIL":
+                        st.error("🔴 수동 DART 재무 Gate FAIL — 신규 진입 금지")
+                    else:
+                        st.warning("🟡 수동 DART 재무 Gate WATCH — 확인 불충분")
+                    for reason in manual_reasons_preview[:4]:
+                        st.caption("• " + str(reason))
                 else:
                     parsed_manual = []
 
@@ -380,7 +376,19 @@ with tab1:
                     and not force_finance_refresh
                 )
 
-                if use_cache:
+                if parsed_manual:
+                    gate, reasons, used_report = manual_gate_from_reports(parsed_manual)
+                    counts = {}
+                    corp = None
+                    name = selected_row.get("Name", selected_code)
+                    source = "MANUAL_DART"
+                    st.info("📎 업로드한 DART 보고서를 우선 사용해 재무 Gate를 판정했습니다.")
+                    if gate == "PASS":
+                        save_candidate_finance(selected_code, {
+                            "gate": gate, "reasons": reasons, "counts": counts,
+                            "corp": corp, "name": name, "source": source
+                        })
+                elif use_cache:
                     gate = cached.get("gate", "WATCH")
                     reasons = cached.get("reasons", [])
                     counts = cached.get("counts", {})
@@ -417,20 +425,6 @@ with tab1:
                             source = "STALE_CACHE"
                             st.warning("🟡 실시간 DART 실패 · 오래된 캐시 참고 · 신규 진입 보류")
                             st.caption(str(e))
-                        elif parsed_manual:
-                            gate, reasons, used_reports = manual_gate_from_reports(parsed_manual, financing_confirmed)
-                            counts = {"RIGHTS_ISSUE":0,"CB":0,"BW":0,"EB":0} if financing_confirmed else {}
-                            corp = None
-                            name = selected_row.get("Name", selected_code)
-                            source = "MANUAL_DART"
-                            st.info("📎 OpenDART 연결 실패 → 업로드한 DART 보고서로 재무 Gate를 계산했습니다.")
-                            st.caption(str(e))
-                            if gate == "PASS":
-                                save_candidate_finance(selected_code, {
-                                    "gate": gate, "reasons": reasons, "counts": counts,
-                                    "corp": corp, "name": name, "source": source
-                                })
-                                st.success("💾 수동 DART 검증 결과를 후보 재무 캐시에 저장했습니다.")
                         else:
                             gate = "WATCH"
                             reasons = ["OpenDART 연결 실패 + 저장된 후보 재무 캐시 없음 + 수동 DART 보고서 없음"]
@@ -648,7 +642,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("v2.7.2 · v2.7.1 매매규칙 동결 + OpenDART 장애 시 DART 보고서 수동 업로드")
+st.caption("v2.7.3 · v2.7.1 매매규칙 동결 + 수동 DART 간편 PASS/WATCH/FAIL 판정")
 
 # v1.3 diagnostic price gate
 
