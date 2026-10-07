@@ -126,7 +126,7 @@ def dart_gate(stock_code: str):
     return gate, reasons, counts, corp, name, "LIVE", 0.0
 
 
-st.title("🐢 K‑TURTLE Mobile v2.7.5 · KR/JP")
+st.title("🐢 K‑TURTLE Mobile v2.7.7 · KR/JP")
 st.caption("가격 원자료 검증 → 매매계획 → Heat → 국가별 재무 Gate → 주문 준비")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌐 전체시장","🔎 단일종목","📒 매매일지","📊 성적표"])
@@ -310,7 +310,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("v2.7.6 · v2.7.1 매매규칙 동결 · JPX 우선 + 안전 폴백 · 국가별 재무검증")
+st.caption("v2.7.7 · v2.7.1 매매규칙 동결 · JPX 우선 + 안전 폴백 · 국가별 재무검증")
 
 # v1.3 diagnostic price gate
 

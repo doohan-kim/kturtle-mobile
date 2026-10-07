@@ -8,6 +8,34 @@ import FinanceDataReader as fdr
 from price_engine import evaluate_price_breakout, calculate_trade_plan
 
 
+JP_SECTOR_KO = {
+    "水産・農林業":"수산·농림업", "鉱業":"광업", "建設業":"건설업", "食料品":"식료품",
+    "繊維製品":"섬유제품", "パルプ・紙":"펄프·종이", "化学":"화학", "医薬品":"의약품",
+    "石油・石炭製品":"석유·석탄제품", "ゴム製品":"고무제품", "ガラス・土石製品":"유리·토석제품",
+    "鉄鋼":"철강", "非鉄金属":"비철금속", "金属製品":"금속제품", "機械":"기계",
+    "電気機器":"전기기기", "輸送用機器":"수송용기기", "精密機器":"정밀기기", "その他製品":"기타제품",
+    "電気・ガス業":"전기·가스업", "陸運業":"육상운송업", "海運業":"해운업", "空運業":"항공운송업",
+    "倉庫・運輸関連業":"창고·운송관련업", "情報・通信業":"정보·통신업", "卸売業":"도매업",
+    "小売業":"소매업", "銀行業":"은행업", "証券、商品先物取引業":"증권·상품선물업",
+    "保険業":"보험업", "その他金融業":"기타금융업", "不動産業":"부동산업", "サービス業":"서비스업",
+    "プライム（内国株式）":"프라임(일본 국내주식)", "スタンダード（内国株式）":"스탠다드(일본 국내주식)",
+    "グロース（内国株式）":"그로스(일본 국내주식)", "プライム":"프라임", "スタンダード":"스탠다드", "グロース":"그로스",
+}
+
+# JPX 종목명은 고유명사라 기계 번역 대신 주요 종목의 공식/통용 한국어명을 우선 사용한다.
+# 미등록 종목은 일본어 원문을 유지해 오역을 방지한다.
+JP_NAME_KO = {
+    "古野電気":"후루노전기", "タムロン":"탐론", "牧野フライス製作所":"마키노프라이스제작소",
+    "トヨタ自動車":"도요타자동차", "ソニーグループ":"소니그룹", "日立製作所":"히타치제작소",
+    "三菱重工業":"미쓰비시중공업", "東京エレクトロン":"도쿄일렉트론", "三菱商事":"미쓰비시상사",
+    "三菱ＵＦＪフィナンシャル・グループ":"미쓰비시UFJ파이낸셜그룹", "みずほフィナンシャルグループ":"미즈호파이낸셜그룹",
+}
+
+def _jp_ko_label(value, mapping):
+    x = str(value).strip()
+    return mapping.get(x, x)
+
+
 def get_kr_universe() -> pd.DataFrame:
     base = fdr.StockListing("KRX").copy()
     base["Code"] = base["Code"].astype(str).str.zfill(6)
@@ -95,6 +123,9 @@ def get_jp_universe() -> pd.DataFrame:
             bad=m.str.contains("ETF|ETN|REIT|投資|PRO|外国|Foreign|出資|優先",case=False,regex=True,na=False)
             out=out[good & ~bad].copy()
         out=out[out["Code"].str.match(r"^[0-9A-Z]{4}$",na=False)].drop_duplicates("Code").reset_index(drop=True)
+        out["Name"] = out["Name"].map(lambda x: _jp_ko_label(x, JP_NAME_KO))
+        out["Market"] = out["Market"].map(lambda x: _jp_ko_label(x, JP_SECTOR_KO))
+        out["SectorLabel"] = out["SectorLabel"].map(lambda x: _jp_ko_label(x, JP_SECTOR_KO))
         if len(out) < 1000:
             raise RuntimeError(f"JPX 응답 종목수 비정상({len(out)})")
         out.attrs["universe_source"]="JPX 공식 TSE 목록"
@@ -120,6 +151,9 @@ def get_jp_universe() -> pd.DataFrame:
         out["Market"]=base[market_col].astype(str).str.strip() if market_col else "TSE"
         out["SectorLabel"]=base[sector_col].astype(str).str.strip() if sector_col else "TSE 기타"
         out=out[out["Code"].str.match(r"^[0-9A-Z]{4}$",na=False)].drop_duplicates("Code").reset_index(drop=True)
+        out["Name"] = out["Name"].map(lambda x: _jp_ko_label(x, JP_NAME_KO))
+        out["Market"] = out["Market"].map(lambda x: _jp_ko_label(x, JP_SECTOR_KO))
+        out["SectorLabel"] = out["SectorLabel"].map(lambda x: _jp_ko_label(x, JP_SECTOR_KO))
         out.attrs["universe_source"]="FinanceDataReader TSE 폴백"
         out.attrs["universe_warning"]=("JPX 공식 목록 연결 실패로 대체 목록을 사용합니다. "
             f"현재 {len(out):,}종목이며 전체시장 여부를 보장하지 않습니다. JPX 오류: {' / '.join(errors)}")
