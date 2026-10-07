@@ -126,8 +126,8 @@ def dart_gate(stock_code: str):
     return gate, reasons, counts, corp, name, "LIVE", 0.0
 
 
-st.title("🐢 K‑TURTLE Mobile v2.7.4 · KR/JP")
-st.caption("가격 원자료 검증 → 매매계획 → Heat → 재무 Gate → 삼성증권 주문 준비")
+st.title("🐢 K‑TURTLE Mobile v2.7.5 · KR/JP")
+st.caption("가격 원자료 검증 → 매매계획 → Heat → 국가별 재무 Gate → 주문 준비")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌐 전체시장","🔎 단일종목","📒 매매일지","📊 성적표"])
 
@@ -145,9 +145,16 @@ with tab1:
     else:
         adtv_min_local = 2_000_000_000.0
     pref=f"kt_{country.lower()}_"
-    if st.button(f'{"일본" if is_jp else "한국"}시장 전체 스캔', type="primary", key=f"scan_{country}"):
+    try:
+        _u_preview = jp_universe_cached() if is_jp else universe_cached()
+        st.caption(f"스캔 유니버스: {len(_u_preview):,}종목 · {('JPX 공식 TSE Prime/Standard/Growth' if is_jp else 'KRX KOSPI/KOSDAQ')}")
+    except Exception as _ue:
+        _u_preview = None
+        st.error(f"종목 유니버스 확인 실패: {_ue}")
+
+    if st.button(f'{"일본" if is_jp else "한국"}시장 전체 스캔', type="primary", key=f"scan_{country}", disabled=(_u_preview is None)):
         try:
-            universe = jp_universe_cached() if is_jp else universe_cached()
+            universe = _u_preview.copy()
             bar=st.progress(0); status=st.empty()
             def cb(frac,ci,chunks,found):
                 bar.progress(frac); status.caption(f"가격 스캔 {ci}/{chunks} · 후보 {found}개")
@@ -297,7 +304,7 @@ with tab2:
 """)
         st.warning("아직 삼성증권 계좌에 주문을 전송하지 않습니다. 이 값을 mPOP에 입력해 최종 주문하세요.")
 
-st.caption("v2.7.3 · v2.7.1 매매규칙 동결 + 수동 DART 간편 PASS/WATCH/FAIL 판정")
+st.caption("v2.7.5 · v2.7.1 매매규칙 동결 · JPX 공식 일본 전체 유니버스 + 국가별 재무검증")
 
 # v1.3 diagnostic price gate
 
@@ -309,7 +316,7 @@ st.caption(
     "각 강세 섹터에서 RSScore가 가장 높은 돌파 종목 1개를 최종 대장주로 표시합니다."
 )
 st.caption(
-    "매매계획 → Heat → DART 재무 Gate → 삼성증권 주문 준비"
+    "한국: DART 재무 Gate · 일본: TDnet/EDINET/기업 IR 재무검증 · 매수 전 Heat 재검사"
 )
 st.caption(
     "섹터 순위는 기존처럼 20일·60일 수익률 중앙값의 상대강도로 계산합니다."
@@ -499,6 +506,5 @@ with tab4:
                 )
 
 st.caption(
-    "v2.7.1: 확정 종가 > 직전 20/55일 최고가 돌파 판정 + 시장 강세섹터 TOP3 참고표시 + 120주 추세 Gate + 유동성 Gate(ADTV 20억원/주문 0.5%) + 최대 3 Units + 시장 강세섹터 TOP3 참고표시. "
-    "같은 종목은 다시 DART를 호출하지 않으며, 필요할 때만 '재무 새로고침'으로 갱신합니다."
+    "v2.7.1 동결: 확정 종가 돌파 + 거래량 2배 + 120주선 + 유동성 Gate + 최대 3 Units. 한국 재무는 DART, 일본 재무는 TDnet/EDINET/기업 IR 검증 전 WATCH입니다."
 )
