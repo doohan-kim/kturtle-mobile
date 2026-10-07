@@ -50,8 +50,37 @@ def get_kr_universe() -> pd.DataFrame:
     return base[keep].drop_duplicates("Code").reset_index(drop=True)
 
 
-def _yf_symbol(code: str, market: str) -> str:
-    return code + (".KS" if market == "KOSPI" else ".KQ")
+
+def get_jp_universe() -> pd.DataFrame:
+    """Tokyo Stock Exchange universe via FinanceDataReader TSE listing.
+
+    Price history is downloaded from Yahoo Finance using <code>.T.
+    Sector/industry labels are taken from the listing when available.
+    """
+    base = fdr.StockListing("TSE").copy()
+    code_col = next((c for c in ["Code", "Symbol", "Ticker"] if c in base.columns), None)
+    name_col = next((c for c in ["Name", "Company", "CompanyName"] if c in base.columns), None)
+    if code_col is None:
+        raise RuntimeError("TSE 종목목록에서 종목코드 열을 찾지 못했습니다.")
+    out = pd.DataFrame()
+    out["Code"] = base[code_col].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    out["Name"] = base[name_col].astype(str) if name_col else out["Code"]
+    market_col = next((c for c in ["Market", "Section", "MarketSegment"] if c in base.columns), None)
+    out["Market"] = base[market_col].astype(str) if market_col else "TSE"
+    sector_col = next((c for c in ["Sector", "Industry", "SectorName", "IndustryName"] if c in base.columns), None)
+    out["SectorLabel"] = base[sector_col].astype(str) if sector_col else "TSE 기타"
+    out["SectorLabel"] = out["SectorLabel"].replace({"": "TSE 기타", "nan": "TSE 기타", "None": "TSE 기타"}).fillna("TSE 기타")
+    # ETFs/REITs can appear in some listing variants; keep common-stock market segments only when recognizable.
+    if market_col:
+        m = out["Market"].str.lower()
+        bad = m.str.contains("etf|etn|reit|fund|pro market", regex=True, na=False)
+        out = out[~bad].copy()
+    return out.drop_duplicates("Code").reset_index(drop=True)
+
+def _yf_symbol(code: str, market: str, country: str = "KR") -> str:
+    if country == "JP":
+        return str(code) + ".T"
+    return str(code) + (".KS" if market == "KOSPI" else ".KQ")
 
 
 def _extract_one(batch_df: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
@@ -173,6 +202,8 @@ def scan_market(
     chunk_size: int = 80,
     max_candidates: int = 100,
     progress_callback=None,
+    country: str = "KR",
+    adtv_min_local: float = 2_000_000_000,
 ) -> tuple[pd.DataFrame, dict]:
     """
     1) KOSPI/KOSDAQ 전체 종목의 RS20/RS60 계산
@@ -182,7 +213,7 @@ def scan_market(
 
     rows = universe.copy()
     rows["Ticker"] = rows.apply(
-        lambda r: _yf_symbol(r["Code"], r["Market"]),
+        lambda r: _yf_symbol(r["Code"], r["Market"], country),
         axis=1
     )
 
@@ -273,7 +304,7 @@ def scan_market(
                 unit_order_krw = float(plan["entry_price"]) * int(plan["unit_qty"])
                 order_adtv_pct = (unit_order_krw / adtv20 * 100.0) if adtv20 > 0 else None
                 liquidity_pass = (
-                    adtv20 >= 2_000_000_000
+                    adtv20 >= float(adtv_min_local)
                     and order_adtv_pct is not None
                     and order_adtv_pct <= 0.5
                 )

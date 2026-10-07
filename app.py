@@ -12,7 +12,7 @@ from heat_engine import evaluate_heat
 from financial_cache import save_financial_gate, load_financial_gate, cache_age_hours
 from candidate_finance_cache import save_candidate_finance, get_candidate_finance
 from trade_journal import record_entry, close_trade, list_trades, delete_trade, performance_summary, grouped_performance, export_csv_bytes, import_csv_bytes, record_add_unit
-from market_scanner import get_kr_universe, scan_market, select_top_sector_leaders, breakout_sector_top3
+from market_scanner import get_kr_universe, get_jp_universe, scan_market, select_top_sector_leaders, breakout_sector_top3
 from manual_dart_upload import parse_manual_report, manual_gate_from_reports
 
 st.set_page_config(page_title="K-TURTLE Mobile", page_icon="🐢", layout="centered")
@@ -93,6 +93,10 @@ def stock_map(k):
 def universe_cached():
     return get_kr_universe()
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def jp_universe_cached():
+    return get_jp_universe()
+
 def dart_gate(stock_code: str):
     k = get_key()
     if not k:
@@ -122,420 +126,71 @@ def dart_gate(stock_code: str):
     return gate, reasons, counts, corp, name, "LIVE", 0.0
 
 
-st.title("🐢 K‑TURTLE Mobile v2.7.2")
+st.title("🐢 K‑TURTLE Mobile v2.7.4 · KR/JP")
 st.caption("가격 원자료 검증 → 매매계획 → Heat → 재무 Gate → 삼성증권 주문 준비")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌐 전체시장","🔎 단일종목","📒 매매일지","📊 성적표"])
 
 with tab1:
-    account_equity = st.number_input("한국 계좌자산(원)", min_value=100000, value=10000000, step=100000)
-    max_candidates = st.number_input("최대 후보 표시", min_value=5, max_value=100, value=30, step=5)
-
-    if st.button("한국시장 전체 스캔", type="primary"):
+    market_choice = st.radio("시장", ["🇰🇷 한국", "🇯🇵 일본"], horizontal=True)
+    is_jp = market_choice.startswith("🇯🇵")
+    country = "JP" if is_jp else "KR"
+    currency = "엔" if is_jp else "원"
+    account_equity = st.number_input(f'{"일본" if is_jp else "한국"} 계좌자산({currency})', min_value=100000, value=(1487000 if is_jp else 10000000), step=(10000 if is_jp else 100000), key=f"eq_{country}")
+    max_candidates = st.number_input("최대 후보 표시", min_value=5, max_value=100, value=30, step=5, key=f"max_{country}")
+    if is_jp:
+        krw_per_jpy = st.number_input("유동성 환산용 1엔당 원화", 5.0, 20.0, 9.30, 0.01, format="%.2f", help="20억원 ADTV 기준을 엔화로 환산합니다.")
+        adtv_min_local = 2_000_000_000 / float(krw_per_jpy)
+        st.caption(f"일본 유동성 Gate: 20일 평균 거래대금 ≥ 약 {adtv_min_local/100_000_000:.2f}억엔 (20억원 환산)")
+    else:
+        adtv_min_local = 2_000_000_000.0
+    pref=f"kt_{country.lower()}_"
+    if st.button(f'{"일본" if is_jp else "한국"}시장 전체 스캔', type="primary", key=f"scan_{country}"):
         try:
-            universe = universe_cached()
-            bar = st.progress(0)
-            status = st.empty()
-
-            def cb(frac, ci, chunks, found):
-                bar.progress(frac)
-                status.caption(f"가격 스캔 {ci}/{chunks} · 후보 {found}개")
-
-            candidates, stats, sector_strength = scan_market(
-                universe,
-                account_equity=float(account_equity),
-                risk_per_unit_pct=0.01,
-                volume_multiple=2.0,
-                max_candidates=int(max_candidates),
-                progress_callback=cb,
-            )
-            leaders = select_top_sector_leaders(
-                candidates,
-                sector_strength,
-                top_n_sectors=3,
-            )
-            st.session_state["kt_raw_candidates"] = candidates
-            st.session_state["kt_sector_strength"] = breakout_sector_top3(
-                candidates, sector_strength, top_n=3
-            )
-            st.session_state["kt_market_sector_top3"] = sector_strength.head(3).copy()
-            st.session_state["kt_candidates"] = leaders
-            stats["sector_leaders"] = len(leaders)
-            st.session_state["kt_stats"] = stats
-        except Exception as e:
-            st.error(str(e))
-
-    if "kt_market_sector_top3" in st.session_state:
-        msec = st.session_state["kt_market_sector_top3"]
-        if msec is not None and not msec.empty:
-            brief = " · ".join(
-                f'{int(r["SectorRank"])}위 {r["Sector"]} ({r["SectorScore"]:.1f})'
-                for _, r in msec.head(3).iterrows()
-            )
-            st.caption("📊 시장 전체 강세섹터 TOP3 · 참고용: " + brief)
-
-    if "kt_sector_strength" in st.session_state:
-        sec = st.session_state["kt_sector_strength"].head(3).copy()
-        if not sec.empty:
-            st.subheader("🔥 돌파 발생 섹터 중 강세 TOP 3 · Breadth")
-            for _, r in sec.iterrows():
-                sector_text = (
-                    f'**{int(r["SectorRank"])}위 {r["Sector"]}**  \n'
-                    f'섹터점수 **{r["SectorScore"]:.1f}** · '
-                    f'20일 **{r["SectorRet20"]:.1f}%** / '
-                    f'60일 **{r["SectorRet60"]:.1f}%**  \n'
-                    f'구성 **{int(r.get("SectorCount", 0))}종목** · '
-                    f'20일 상승 **{r.get("Up20Ratio", 0):.0f}%** · '
-                    f'60일 상승 **{r.get("Up60Ratio", 0):.0f}%** · '
-                    f'가격Gate 돌파 **{int(r.get("BreakoutCount", 0))}종목**'
-                )
-                st.markdown(sector_text)
-
-    if "kt_candidates" in st.session_state:
-        cand = st.session_state["kt_candidates"]
-        if cand.empty:
-            st.warning("가격 Gate 통과 후보 없음")
+            universe = jp_universe_cached() if is_jp else universe_cached()
+            bar=st.progress(0); status=st.empty()
+            def cb(frac,ci,chunks,found):
+                bar.progress(frac); status.caption(f"가격 스캔 {ci}/{chunks} · 후보 {found}개")
+            candidates,stats,sector_strength=scan_market(universe, account_equity=float(account_equity), risk_per_unit_pct=0.01, volume_multiple=2.0, max_candidates=int(max_candidates), progress_callback=cb, country=country, adtv_min_local=float(adtv_min_local))
+            leaders=select_top_sector_leaders(candidates,sector_strength,top_n_sectors=3)
+            st.session_state[pref+"sector_strength"]=breakout_sector_top3(candidates,sector_strength,top_n=3)
+            st.session_state[pref+"market_sector_top3"]=sector_strength.head(3).copy()
+            st.session_state[pref+"candidates"]=leaders
+        except Exception as e: st.error(str(e))
+    msec=st.session_state.get(pref+"market_sector_top3")
+    if msec is not None and not msec.empty:
+        brief=" · ".join(f'{int(r["SectorRank"])}위 {r["Sector"]} ({r["SectorScore"]:.1f})' for _,r in msec.head(3).iterrows())
+        st.caption("📊 시장 전체 강세섹터 TOP3 · 참고용: "+brief)
+    sec=st.session_state.get(pref+"sector_strength")
+    if sec is not None and not sec.empty:
+        st.subheader("🔥 돌파 발생 섹터 중 강세 TOP3")
+        for _,r in sec.head(3).iterrows(): st.markdown(f'**{int(r["SectorRank"])}위 {r["Sector"]}** · 점수 **{r["SectorScore"]:.1f}** · 20일 **{r["SectorRet20"]:.1f}%** / 60일 **{r["SectorRet60"]:.1f}%** · 돌파 **{int(r.get("BreakoutCount",0))}종목**')
+    cand=st.session_state.get(pref+"candidates")
+    if cand is not None:
+        if cand.empty: st.warning(f'{"일본" if is_jp else "한국"}시장 신규 가격 Gate 후보 없음')
         else:
-            st.caption("가격 Gate를 먼저 통과한 종목들의 섹터만 추린 뒤, 그 섹터들을 전체시장 상대강도로 비교해 TOP3를 고르고 각 섹터의 최강 돌파주 1개를 표시합니다.")
-
-            for idx, row in cand.head(int(max_candidates)).iterrows():
-                code = row.get("Code","")
-                name = row.get("Name","")
-                market = row.get("Market","")
-                breakout = row.get("Breakout","")
-                close = row.get("Close")
-                high = row.get("TodayHigh")
-                h20 = row.get("H20")
-                h55 = row.get("H55")
-                vr = row.get("VolumeRatio")
-                atr = row.get("ATR_N")
-                qty = row.get("UnitQty")
-                stop = row.get("Stop2N")
-                add = row.get("Add0_5N")
-                b20 = row.get("Break20Pct", 0) or 0
-                b55 = row.get("Break55Pct", 0) or 0
-
-                st.markdown(
-                    f"""
-                    <div class="kt-card">
-                      <div class="kt-title">{name} <span style="opacity:.6;font-size:.9rem">({code})</span></div>
-                      <div class="kt-sub">섹터 {int(row.get("SectorRank",0))}위 · {market} · {row.get("Sector","기타")} · {breakout}</div>
-                      <div class="kt-grid">
-                        <div><span class="kt-label">섹터 RS 점수</span><br><span class="kt-val">{row.get("RSScore",0):.1f}</span></div>
-                        <div><span class="kt-label">20일 / 60일 수익률</span><br><span class="kt-val">{row.get("RS20",0):.1f}% / {row.get("RS60",0):.1f}%</span></div>
-                        <div><span class="kt-label">종가</span><br><span class="kt-val">{close:,.0f}원</span></div>
-                        <div><span class="kt-label">거래량배수</span><br><span class="kt-val">{vr:.2f}배</span></div>
-                        <div><span class="kt-label">20일 돌파율</span><br><span class="kt-val">{b20:.2f}%</span></div>
-                        <div><span class="kt-label">55일 돌파율</span><br><span class="kt-val">{b55:.2f}%</span></div>
-                        <div><span class="kt-label">ATR(N)</span><br><span class="kt-val">{atr:,.0f}원</span></div>
-                        <div><span class="kt-label">1 Unit</span><br><span class="kt-val">{int(qty):,}주</span></div>
-                        <div><span class="kt-label">2N 손절</span><br><span class="kt-val">{stop:,.0f}원</span></div>
-                        <div><span class="kt-label">+0.5N</span><br><span class="kt-val">{add:,.0f}원</span></div>
-                        <div><span class="kt-label">120주선</span><br><span class="kt-val">{row.get("WeeklyMA120",0):,.0f}원 · PASS</span></div>
-                        <div><span class="kt-label">20일 평균 거래대금</span><br><span class="kt-val">{row.get("ADTV20",0)/100000000:.1f}억원</span></div>
-                        <div><span class="kt-label">주문/ADTV</span><br><span class="kt-val">{row.get("OrderADTVPct",0):.3f}%</span></div>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            with st.expander("📊 원자료 표 보기"):
-                diag_cols = [
-                    "Code","Name","Market","Sector","Breakout",
-                    "Close","TodayHigh","H20","H55",
-                    "TodayVolume","Avg20Volume","VolumeRatio",
-                    "Break20Pct","Break55Pct",
-                    "ATR_N","UnitQty","Stop2N","Add0_5N",
-                    "WeeklyMA120","ADTV20","UnitOrderKRW","OrderADTVPct"
-                ]
-                existing = [c for c in diag_cols if c in cand.columns]
-                show = cand[existing].copy()
-                rename = {
-                    "Code":"코드","Name":"종목","Market":"시장","Sector":"섹터","Breakout":"돌파",
-                    "Close":"종가","TodayHigh":"오늘고가","H20":"20일고점","H55":"55일고점",
-                    "TodayVolume":"오늘거래량","Avg20Volume":"직전20일평균거래량","VolumeRatio":"거래량배수",
-                    "Break20Pct":"20일돌파율(%)","Break55Pct":"55일돌파율(%)",
-                    "ATR_N":"ATR(N)","UnitQty":"1 Unit","Stop2N":"2N손절","Add0_5N":"+0.5N",
-                    "WeeklyMA120":"120주선","ADTV20":"20일평균거래대금","UnitOrderKRW":"1Unit주문금액","OrderADTVPct":"주문/ADTV(%)"
-                }
-                show = show.rename(columns=rename)
-                st.dataframe(show, use_container_width=True, hide_index=True)
-
-            with st.expander("검증 공식 보기"):
-                st.code(
-                    "거래량배수 = 오늘 거래량 ÷ 직전 20거래일 평균 거래량\n"
-                    "20일돌파율 = (확정 종가 ÷ 직전 20일 최고가 - 1) × 100\n"
-                    "55일돌파율 = (확정 종가 ÷ 직전 55일 최고가 - 1) × 100\n"
-                    "※ 종가가 직전 고점과 같은 경우는 돌파로 인정하지 않습니다."
-                )
-
-            st.divider()
-            st.subheader("최종 검증")
-
-            candidate_labels = (
-                cand["Code"].astype(str)
-                + " · "
-                + cand["Name"].astype(str)
-                + " · RS "
-                + cand["RSScore"].round(1).astype(str)
-            )
-
-            selected = st.selectbox(
-                "검증할 섹터 대장주",
-                candidate_labels.tolist()
-            )
-
-            selected_code = selected.split(" · ")[0]
-            selected_row = cand[cand["Code"].astype(str) == selected_code].iloc[0]
-
-            st.caption(
-                f'{selected_row["Name"]} · {selected_row["Sector"]} · '
-                f'RS {selected_row["RSScore"]:.1f} · {selected_row["Breakout"]}'
-            )
-
-            force_finance_refresh = st.checkbox(
-                "재무 새로고침",
-                value=False,
-                help="체크하면 24시간 캐시를 무시하고 OpenDART에서 다시 조회합니다."
-            )
-
-            with st.expander("📎 DART 보고서 직접 넣기", expanded=False):
-                st.caption("OpenDART가 안 될 때 DART의 IFRS 원문 XBRL ZIP을 넣으세요. 최근 4개 분기가 모이면 K-TURTLE 재무 Gate를 즉시 PASS / WATCH / FAIL로 판정합니다.")
-                manual_files = st.file_uploader(
-                    "DART XBRL ZIP (최근 4개 분기)",
-                    type=["zip"],
-                    accept_multiple_files=True,
-                    key=f"manual_dart_{selected_code}"
-                )
-                if manual_files:
-                    parsed_manual = [parse_manual_report(f) for f in manual_files]
-                    manual_gate_preview, manual_reasons_preview, manual_used = manual_gate_from_reports(parsed_manual)
-                    if manual_gate_preview == "PASS":
-                        st.success("🟢 수동 DART 재무 Gate PASS")
-                    elif manual_gate_preview == "FAIL":
-                        st.error("🔴 수동 DART 재무 Gate FAIL — 신규 진입 금지")
-                    else:
-                        st.warning("🟡 수동 DART 재무 Gate WATCH — 확인 불충분")
-                    for reason in manual_reasons_preview[:4]:
-                        st.caption("• " + str(reason))
+            st.caption("v2.7.1 동결 가격규칙 + 유동성 Gate 통과 후 돌파섹터 TOP3의 RSScore 1위만 표시")
+            for _,row in cand.head(int(max_candidates)).iterrows():
+                close=float(row.get("Close",0)); atr=float(row.get("ATR_N",0)); qty=int(row.get("UnitQty",0)); adtv=float(row.get("ADTV20",0))
+                st.markdown(f'''<div class="kt-card"><div class="kt-title">{row.get("Name","")} <span style="opacity:.6">({row.get("Code","")})</span></div><div class="kt-sub">섹터 {int(row.get("SectorRank",0))}위 · {row.get("Market","")} · {row.get("Sector","기타")} · {row.get("Breakout","")}</div><div class="kt-grid"><div><span class="kt-label">RSScore</span><br><span class="kt-val">{row.get("RSScore",0):.1f}</span></div><div><span class="kt-label">종가</span><br><span class="kt-val">{close:,.0f}{currency}</span></div><div><span class="kt-label">거래량배수</span><br><span class="kt-val">{row.get("VolumeRatio",0):.2f}배</span></div><div><span class="kt-label">ATR(N)</span><br><span class="kt-val">{atr:,.0f}{currency}</span></div><div><span class="kt-label">1 Unit</span><br><span class="kt-val">{qty:,}주</span></div><div><span class="kt-label">2N 손절</span><br><span class="kt-val">{row.get("Stop2N",0):,.0f}{currency}</span></div><div><span class="kt-label">+0.5N / +1.0N</span><br><span class="kt-val">{row.get("Add0_5N",0):,.0f} / {close+atr:,.0f}{currency}</span></div><div><span class="kt-label">120주선</span><br><span class="kt-val">{row.get("WeeklyMA120",0):,.0f}{currency} · PASS</span></div><div><span class="kt-label">20일 평균 거래대금</span><br><span class="kt-val">{adtv/100_000_000:.2f}억{currency}</span></div><div><span class="kt-label">주문/ADTV</span><br><span class="kt-val">{row.get("OrderADTVPct",0):.3f}%</span></div></div></div>''', unsafe_allow_html=True)
+            st.divider(); st.subheader("최종 검증")
+            labels=(cand["Code"].astype(str)+" · "+cand["Name"].astype(str)+" · RS "+cand["RSScore"].round(1).astype(str)).tolist()
+            selected=st.selectbox("검증할 섹터 대장주",labels,key=f"leader_{country}"); selected_code=selected.split(" · ")[0]; selected_row=cand[cand["Code"].astype(str)==selected_code].iloc[0]
+            h1,h2=st.columns(2); pf=h1.number_input(f"현재 Portfolio Heat({currency})",min_value=0,value=0,step=10000,key=f"pf_{country}"); sh=h2.number_input(f"현재 Sector Heat({currency})",min_value=0,value=0,step=10000,key=f"sh_{country}")
+            if st.button("선택 후보 Heat/재무 확인",type="primary",key=f"verify_{country}"):
+                heat=evaluate_heat(float(selected_row["RiskKRW"]),float(account_equity),float(pf),float(sh))
+                if heat["status"]!="PASS": st.error(f'🔴 Heat FAIL — {heat["reason"]}')
+                elif is_jp:
+                    st.success("🟢 Portfolio/Sector Heat PASS"); st.warning("🟡 일본 재무 Gate WATCH — TDnet/EDINET/기업 IR 검증 전 신규 진입 금지. 이 가격 후보를 ChatGPT에 보내 재무검증하세요.")
                 else:
-                    parsed_manual = []
-
-            h1, h2 = st.columns(2)
-            current_portfolio_heat = h1.number_input(
-                "현재 Portfolio Heat(원)",
-                min_value=0,
-                value=0,
-                step=10000,
-                key="market_pf_heat"
-            )
-            current_sector_heat = h2.number_input(
-                "현재 Sector Heat(원)",
-                min_value=0,
-                value=0,
-                step=10000,
-                key="market_sector_heat"
-            )
-
-            if st.button("선택 후보 최종 검증", type="primary"):
-                st.subheader("1. Heat 검사")
-
-                heat = evaluate_heat(
-                    new_trade_risk_krw=float(selected_row["RiskKRW"]),
-                    account_equity=float(account_equity),
-                    current_portfolio_heat_krw=float(current_portfolio_heat),
-                    current_sector_heat_krw=float(current_sector_heat),
-                )
-
-                st.write(
-                    f'Portfolio Heat: **{heat["portfolio_heat_krw"]:,.0f} / '
-                    f'{heat["portfolio_limit_krw"]:,.0f}원**'
-                )
-                st.write(
-                    f'Sector Heat: **{heat["sector_heat_krw"]:,.0f} / '
-                    f'{heat["sector_limit_krw"]:,.0f}원**'
-                )
-
-                if heat["status"] != "PASS":
-                    st.error(f'🔴 {heat["reason"]}')
-                    st.info("Heat 미통과 → 재무 Gate 생략")
-                    st.stop()
-
-                st.success("🟢 Heat PASS")
-
-                st.subheader("2. 재무·공시 Gate")
-
-                CACHE_TTL_HOURS = 24.0
-                cached, cache_hours = get_candidate_finance(selected_code)
-
-                use_cache = (
-                    cached is not None
-                    and cache_hours is not None
-                    and cache_hours <= CACHE_TTL_HOURS
-                    and not force_finance_refresh
-                )
-
-                if parsed_manual:
-                    gate, reasons, used_report = manual_gate_from_reports(parsed_manual)
-                    counts = {}
-                    corp = None
-                    name = selected_row.get("Name", selected_code)
-                    source = "MANUAL_DART"
-                    st.info("📎 업로드한 DART 보고서를 우선 사용해 재무 Gate를 판정했습니다.")
-                    if gate == "PASS":
-                        save_candidate_finance(selected_code, {
-                            "gate": gate, "reasons": reasons, "counts": counts,
-                            "corp": corp, "name": name, "source": source
-                        })
-                elif use_cache:
-                    gate = cached.get("gate", "WATCH")
-                    reasons = cached.get("reasons", [])
-                    counts = cached.get("counts", {})
-                    corp = cached.get("corp")
-                    name = cached.get("name", selected_row.get("Name", selected_code))
-                    source = "CACHE"
-                    st.success(f"⚡ 재무 캐시 사용 · {cache_hours:.1f}시간 전 조회")
-                else:
+                    st.success("🟢 Portfolio/Sector Heat PASS")
                     try:
-                        with st.spinner("최종 후보 재무를 OpenDART에서 확인하는 중..."):
-                            gate, reasons, counts, corp, name, _, _ = dart_gate(selected_code)
-
-                        save_candidate_finance(
-                            selected_code,
-                            {
-                                "gate": gate,
-                                "reasons": reasons,
-                                "counts": counts,
-                                "corp": corp,
-                                "name": name,
-                            }
-                        )
-                        source = "LIVE"
-                        st.success("🌐 OpenDART 조회 완료 · 결과를 24시간 캐시에 저장")
-                    except Exception as e:
-                        if cached:
-                            gate = "WATCH"
-                            reasons = list(cached.get("reasons", [])) + [
-                                "OpenDART 실시간 연결 실패 — 오래된 캐시는 참고용"
-                            ]
-                            counts = cached.get("counts", {})
-                            corp = cached.get("corp")
-                            name = cached.get("name", selected_row.get("Name", selected_code))
-                            source = "STALE_CACHE"
-                            st.warning("🟡 실시간 DART 실패 · 오래된 캐시 참고 · 신규 진입 보류")
-                            st.caption(str(e))
-                        else:
-                            gate = "WATCH"
-                            reasons = ["OpenDART 연결 실패 + 저장된 후보 재무 캐시 없음 + 수동 DART 보고서 없음"]
-                            counts = {}
-                            corp = None
-                            name = selected_row.get("Name", selected_code)
-                            source = "NONE"
-                            st.warning("🟡 재무 Gate 미확정 — 신규 진입 보류")
-                            st.caption(str(e))
-
-                if gate == "PASS":
-                    st.success(f"🟢 재무 Gate PASS · {source}")
-                elif gate == "WATCH":
-                    st.warning(f"🟡 재무 Gate WATCH · {source} — 신규 진입 보류")
-                elif gate == "FAIL":
-                    st.error(f"🔴 재무 Gate FAIL · {source} — 신규 진입 금지")
-                else:
-                    gate = "WATCH"
-                    st.warning("🟡 재무 Gate 미확정 — 신규 진입 보류")
-
-                for reason in reasons:
-                    st.write("•", reason)
-
-                if counts:
-                    cols = st.columns(4)
-                    for col, key, label in zip(
-                        cols,
-                        ["RIGHTS_ISSUE","CB","BW","EB"],
-                        ["유증","CB","BW","EB"]
-                    ):
-                        col.metric(label, counts.get(key, 0))
-
-                if gate != "PASS":
-                    st.stop()
-
-                st.subheader("3. 삼성증권 주문 준비")
-                st.success("🟢 최종 진입 후보")
-
-                st.markdown(
-                    f"""
-**종목:** {name} ({selected_code})  
-**섹터:** {selected_row["Sector"]}  
-**섹터 RS:** {selected_row["RSScore"]:.1f}  
-**돌파:** {selected_row["Breakout"]}  
-**진입 기준가:** {selected_row["Close"]:,.0f}원  
-**1 Unit:** {int(selected_row["UnitQty"]):,}주  
-**ATR(N):** {selected_row["ATR_N"]:,.0f}원  
-**2N 손절:** {selected_row["Stop2N"]:,.0f}원  
-**+0.5N 추가매수:** {selected_row["Add0_5N"]:,.0f}원  
-**거래량 배수:** {selected_row["VolumeRatio"]:.2f}배  
-**120주선:** {selected_row.get("WeeklyMA120",0):,.0f}원 · PASS  
-**20일 평균 거래대금:** {selected_row.get("ADTV20",0)/100000000:.1f}억원  
-**1 Unit / ADTV:** {selected_row.get("OrderADTVPct",0):.3f}% · PASS  
-"""
-                )
-
-                st.warning(
-                    "아직 삼성증권 계좌로 주문을 전송하지 않습니다. "
-                    "위 값을 mPOP에 입력해 사용자가 최종 주문합니다."
-                )
-
-                st.divider()
-                st.subheader("4. 실제 체결 기록")
-                st.caption("삼성증권에서 실제 체결된 가격과 수량을 입력하면 매매일지에 저장됩니다.")
-
-                fill_c1, fill_c2 = st.columns(2)
-                actual_entry = fill_c1.number_input(
-                    "실제 체결가(원)",
-                    min_value=0.0,
-                    value=float(selected_row["Close"]),
-                    step=10.0,
-                    key=f"actual_entry_{selected_code}"
-                )
-                actual_qty = fill_c2.number_input(
-                    "실제 체결수량(주)",
-                    min_value=1,
-                    value=int(selected_row["UnitQty"]),
-                    step=1,
-                    key=f"actual_qty_{selected_code}"
-                )
-                trade_memo = st.text_input(
-                    "메모(선택)",
-                    value="",
-                    key=f"entry_memo_{selected_code}"
-                )
-
-                if st.button("✅ 체결 기록 저장", key=f"save_trade_{selected_code}"):
-                    actual_risk = max(
-                        0.0,
-                        (float(actual_entry) - float(selected_row["Stop2N"])) * int(actual_qty)
-                    )
-                    try:
-                        trade = record_entry({
-                            "stock_code": selected_code,
-                            "name": name,
-                            "sector": selected_row.get("Sector"),
-                            "breakout_type": selected_row.get("Breakout"),
-                            "sector_score": selected_row.get("SectorScore"),
-                            "rs_score": selected_row.get("RSScore"),
-                            "entry_price": actual_entry,
-                            "qty": actual_qty,
-                            "atr_n": selected_row.get("ATR_N"),
-                            "initial_stop": selected_row.get("Stop2N"),
-                            "add_05n": selected_row.get("Add0_5N"),
-                            "add_10n": float(selected_row.get("Close",0)) + float(selected_row.get("ATR_N",0)),
-                            "risk_krw": actual_risk,
-                            "memo": trade_memo,
-                        })
-                        st.success(f"📒 매매일지 저장 완료 · {trade['name']} {trade['qty']}주")
-                    except Exception as e:
-                        st.error(str(e))
+                        with st.spinner("OpenDART 최신 재무·공시 확인 중..."): gate,reasons,counts,corp,name,_,_=dart_gate(selected_code)
+                    except Exception as e: gate="WATCH"; reasons=[f"OpenDART 확인 실패: {e}"]
+                    if gate=="PASS": st.success("🟢 재무 Gate PASS → 신규 진입 가능")
+                    elif gate=="FAIL": st.error("🔴 재무 Gate FAIL → 신규 진입 금지")
+                    else: st.warning("🟡 재무 Gate WATCH → 신규 진입 보류")
+                    for reason in reasons[:6]: st.caption("• "+str(reason))
 
 with tab2:
     account_equity = st.number_input("계좌자산(원)", min_value=100000, value=10000000, step=100000, key="eq")
